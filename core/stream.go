@@ -562,10 +562,9 @@ type listpackEntry struct {
 
 // buildListpackWithBacklen builds a proper listpack with backlen values
 func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
-	var listpackData []byte
-	var entrySizes []uint32
+	var finalListpack []byte
 
-	// First pass: encode entries and calculate sizes
+	// Encode each entry as content + backlen, then append the listpack end marker.
 	for _, entry := range entries {
 		var encoded []byte
 		if entry.strVal != "" {
@@ -573,27 +572,13 @@ func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
 		} else {
 			encoded = enc.encodeListPackInt(entry.intVal)
 		}
-		listpackData = append(listpackData, encoded...)
-		entrySizes = append(entrySizes, uint32(len(encoded)))
+		finalListpack = append(finalListpack, encoded...)
+		finalListpack = append(finalListpack, enc.encodeBacklen(uint32(len(encoded)))...)
 	}
+	finalListpack = append(finalListpack, 0xFF) // listpack end marker
 
-	// Second pass: add backlen values
-	var finalListpack []byte
-	for i := len(entries) - 1; i >= 0; i-- {
-		// Add backlen
-		backlen := enc.encodeBacklen(entrySizes[i])
-		finalListpack = append(backlen, finalListpack...)
-		// Add entry
-		entryStart := 0
-		for j := 0; j < i; j++ {
-			entryStart += int(entrySizes[j])
-		}
-		entryEnd := entryStart + int(entrySizes[i])
-		finalListpack = append(listpackData[entryStart:entryEnd], finalListpack...)
-	}
-
-	// Add header
-	totalBytes := len(finalListpack) + 6 // 6 bytes for header
+	// Prepend the 6-byte header: total bytes (4) + number of elements (2).
+	totalBytes := len(finalListpack) + 6
 	header := make([]byte, 6)
 	binary.LittleEndian.PutUint32(header[0:4], uint32(totalBytes))
 	binary.LittleEndian.PutUint16(header[4:6], uint16(len(entries)))
@@ -760,20 +745,18 @@ func (enc *Encoder) writeStreamGroups(groups []*model.StreamGroup, version uint)
 
 // encodeListPackInt encodes an integer for listpack
 func (enc *Encoder) encodeListPackInt(val int64) []byte {
-	if val >= -127 && val <= 127 {
-		// 0xxxxxxx, uint7
+	if val >= 0 && val <= 127 {
+		// 0xxxxxxx, uint7 non-negative small integer
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
-		// 110xxxxx yyyyyyyy, int13
+	} else if val >= -4096 && val <= 4095 {
+		// 110xxxxx yyyyyyyy, int13 signed 13-bit two's-complement integer.
+		// Must stay consistent with Decoder.readListPackEntry's int13 branch.
 		uval := uint16(val)
-		if val < 0 {
-			uval = uint16(8191 + val + 1)
-		}
 		return []byte{
-			byte(0xC0 | (uval >> 8)),
+			byte(0xC0 | ((uval >> 8) & 0x1F)),
 			byte(uval & 0xFF),
 		}
-	} else if val >= -32767 && val <= 32767 {
+	} else if val >= -32768 && val <= 32767 {
 		// 11110001 aaaaaaaa bbbbbbbb, int16
 		uval := uint16(val)
 		return []byte{
@@ -781,7 +764,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte(uval & 0xFF),
 			byte(uval >> 8),
 		}
-	} else if val >= -8388607 && val <= 8388607 {
+	} else if val >= -8388608 && val <= 8388607 {
 		// 11110010 aaaaaaaa bbbbbbbb cccccccc, int24
 		uval := uint32(val)
 		return []byte{
@@ -790,7 +773,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte((uval >> 8) & 0xFF),
 			byte((uval >> 16) & 0xFF),
 		}
-	} else if val >= -2147483647 && val <= 2147483647 {
+	} else if val >= -2147483648 && val <= 2147483647 {
 		// 11110011 aaaaaaaa bbbbbbbb cccccccc dddddddd, int32
 		uval := uint32(val)
 		return []byte{

@@ -49,6 +49,17 @@ func (dec *Decoder) WithSpecialType(moduleType string, f ModuleTypeHandleFunc) *
 	return dec
 }
 
+// RDBVersion returns the rdb version parsed from file header.
+// It returns 0 before Parse is called.
+func (dec *Decoder) RDBVersion() int {
+	return dec.rdbVersion
+}
+
+// Valkey reports whether the file uses the VALKEY magic (Valkey 9+ rdb format).
+func (dec *Decoder) Valkey() bool {
+	return dec.valkey
+}
+
 var magicNumberRedis = []byte("REDIS")
 var magicNumberValkey = []byte("VALKEY")
 
@@ -126,6 +137,7 @@ var encodingMap = map[int]string{
 	typeListQuickList:         model.QuickListEncoding,
 	typeStreamListPacks:       model.ListPackEncoding,
 	typeStreamListPacks2:      model.ListPackEncoding,
+	typeStreamListPacks3:      model.ListPackEncoding,
 	typeHashListPack:          model.ListPackEncoding,
 	typeZsetListPack:          model.ListPackEncoding,
 	typeListQuickList2:        model.QuickList2Encoding,

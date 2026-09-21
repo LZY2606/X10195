@@ -201,6 +201,23 @@ func (enc *Encoder) WriteAux(key, value string) error {
 	return nil
 }
 
+// WriteFunctions writes the RDB_OPCODE_FUNCTION (245) payload carrying the
+// serialized function libraries. functionsLua is the exact blob produced by
+// Redis FUNCTION DUMP; it must be preserved byte-for-byte.
+func (enc *Encoder) WriteFunctions(functionsLua string) error {
+	if !enc.validateStateChange(writtenAuxState) {
+		return fmt.Errorf("cannot write functions at state: %s", enc.state)
+	}
+	if err := enc.write([]byte{opCodeFunction}); err != nil {
+		return err
+	}
+	if err := enc.writeString(functionsLua); err != nil {
+		return err
+	}
+	enc.state = writtenAuxState
+	return nil
+}
+
 // WriteDBHeader write db index and resize db into rdb file
 func (enc *Encoder) WriteDBHeader(dbIndex uint, keyCount, ttlCount uint64) error {
 	if !enc.validateStateChange(writtenDBHeaderState) {
