@@ -1,0 +1,10 @@
+{
+  "entries": [
+    {
+      "path": "cases/unknown_opcode.rdb",
+      "reason": "Hand-crafted RDB whose body contains value-type/opcode byte 242, which this parser deliberately does not implement; decoding must reject it at the decode stage instead of silently ignoring the byte.",
+      "expected_stage": "decode",
+      "error_contains": "unknown type flag"
+    }
+  ]
+}

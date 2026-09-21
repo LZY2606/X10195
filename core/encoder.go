@@ -17,6 +17,9 @@ type Encoder struct {
 	existDB  map[uint]struct{} // store exist db size to avoid duplicate db
 	compress bool
 	state    string
+	// rdbVersion selects the 3-digit RDB version written into the header.
+	// 0 means the default (Redis 11). Valkey encoders ignore this and always write VALKEY080.
+	rdbVersion int
 
 	listZipListOpt  *zipListOpt
 	hashZipListOpt  *zipListOpt
@@ -111,6 +114,15 @@ func NewEncoderValkey(writer io.Writer) *Encoder {
 	return enc
 }
 
+// SetRDBVersion overrides the RDB format version written into the header (Redis only).
+// Allowed range is minVersion..maxVersion; out-of-range values are rejected by
+// WriteHeader. The encoder still emits type bytes that the chosen version must be
+// able to represent, so callers are responsible for selecting a compatible version.
+func (enc *Encoder) SetRDBVersion(version int) *Encoder {
+	enc.rdbVersion = version
+	return enc
+}
+
 // SetListZipListOpt sets list-max-ziplist-value and list-max-ziplist-entries
 func (enc *Encoder) SetListZipListOpt(maxValue, maxEntries int) *Encoder {
 	enc.listZipListOpt = &zipListOpt{
@@ -168,11 +180,23 @@ func (enc *Encoder) WriteHeader() error {
 	if !enc.validateStateChange(writtenHeaderState) {
 		return fmt.Errorf("cannot writing header at state: %s", enc.state)
 	}
-	var rdbHeader []byte = rdbHeaderRedis
 	if enc.valkey {
-		rdbHeader = rdbHeaderValkey
+		err := enc.write(rdbHeaderValkey)
+		if err != nil {
+			return err
+		}
+		enc.state = writtenHeaderState
+		return nil
 	}
-	err := enc.write(rdbHeader)
+	version := enc.rdbVersion
+	if version == 0 {
+		version = 11
+	}
+	if version < minVersion || version > maxVersion {
+		return fmt.Errorf("cannot write unsupported rdb version: %d", version)
+	}
+	header := fmt.Sprintf("REDIS%04d", version)
+	err := enc.write([]byte(header))
 	if err != nil {
 		return err
 	}
@@ -194,6 +218,25 @@ func (enc *Encoder) WriteAux(key, value string) error {
 		return err
 	}
 	err = enc.writeString(value)
+	if err != nil {
+		return err
+	}
+	enc.state = writtenAuxState
+	return nil
+}
+
+// WriteFunctions writes the serialized function libraries payload (RDB_OPCODE_FUNCTION, opcode 245).
+// The payload is the opaque blob produced by Redis/Valkey function serialization and is
+// stored verbatim, so round-tripping never loses function library semantics.
+func (enc *Encoder) WriteFunctions(payload string) error {
+	if !enc.validateStateChange(writtenAuxState) {
+		return fmt.Errorf("cannot writing functions at state: %s", enc.state)
+	}
+	err := enc.write([]byte{opCodeFunction})
+	if err != nil {
+		return err
+	}
+	err = enc.writeString(payload)
 	if err != nil {
 		return err
 	}
@@ -277,6 +320,33 @@ func WithTTL(expirationMs uint64) TTLOption {
 	return TTLOption(expirationMs)
 }
 
+// IdleOption carries the LRU idle time (RDB_OPCODE_IDLE, 248) for an object.
+type IdleOption uint64
+
+// WithIdle marks the next object with the given LRU idle time.
+func WithIdle(idle uint64) IdleOption {
+	return IdleOption(idle)
+}
+
+// FreqOption carries the LFU frequency (RDB_OPCODE_FREQ, 249) for an object.
+type FreqOption byte
+
+// WithFreq marks the next object with the given LFU frequency.
+func WithFreq(freq byte) FreqOption {
+	return FreqOption(freq)
+}
+
+func (enc *Encoder) writeIdle(idle uint64) error {
+	if err := enc.write([]byte{opCodeIdle}); err != nil {
+		return err
+	}
+	return enc.writeLength(idle)
+}
+
+func (enc *Encoder) writeFreq(freq byte) error {
+	return enc.write([]byte{opCodeFreq, freq})
+}
+
 func (enc *Encoder) beforeWriteObject(options ...interface{}) error {
 	if !enc.validateStateChange(writtenObjectState) {
 		return fmt.Errorf("cannot write object at state: %s", enc.state)
@@ -285,6 +355,16 @@ func (enc *Encoder) beforeWriteObject(options ...interface{}) error {
 		switch o := opt.(type) {
 		case TTLOption:
 			err := enc.writeTTL(uint64(o))
+			if err != nil {
+				return err
+			}
+		case IdleOption:
+			err := enc.writeIdle(uint64(o))
+			if err != nil {
+				return err
+			}
+		case FreqOption:
+			err := enc.writeFreq(byte(o))
 			if err != nil {
 				return err
 			}

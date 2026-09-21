@@ -169,9 +169,19 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 			return nil, fmt.Errorf("read stream item id seq failed: %v", err)
 		}
 		// ms and seq may be negative
+		// Add in signed 128-bit space first: ms/seq may legitimately be
+		// negative (stream IDs can cross ms boundaries with wrapped sequence
+		// numbers). Converting the diff to uint64 before the addition would
+		// wrap and corrupt the ID.
+		absMs := int64(firstId.Ms) + ms
+		absSeq := int64(firstId.Sequence) + seq
+		if absMs < 0 || absSeq < 0 {
+			return nil, fmt.Errorf("stream item id %d-%d before first id %s", ms, seq,
+				fmt.Sprintf("%d-%d", firstId.Ms, firstId.Sequence))
+		}
 		msgId := &model.StreamId{
-			Ms:       uint64(ms + int64(firstId.Ms)),
-			Sequence: uint64(seq + int64(firstId.Sequence)),
+			Ms:       uint64(absMs),
+			Sequence: uint64(absSeq),
 		}
 		fieldNum := masterFieldNum
 		if flag&StreamItemFlagSameFields == 0 {
@@ -601,22 +611,25 @@ func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
 	return append(header, finalListpack...)
 }
 
-// encodeBacklen encodes a backlen value
+// encodeBacklen encodes a prevlen (back length) value using the listpack
+// scheme: a single byte for 0..127, then 2..5 bytes whose leading bits are
+// all ones so a reader can count the bytes. The thresholds match
+// lpEncodeBacklen in Redis listpack.c.
 func (enc *Encoder) encodeBacklen(elementLen uint32) []byte {
 	if elementLen <= 127 {
 		return []byte{byte(elementLen)}
-	} else if elementLen < (1<<14)-1 {
+	} else if elementLen < 16384 {
 		return []byte{
 			byte(0x80 | (elementLen >> 8)),
 			byte(elementLen & 0xFF),
 		}
-	} else if elementLen < (1<<21)-1 {
+	} else if elementLen < (1 << 21) {
 		return []byte{
 			byte(0xC0 | (elementLen >> 16)),
 			byte((elementLen >> 8) & 0xFF),
 			byte(elementLen & 0xFF),
 		}
-	} else if elementLen < (1<<28)-1 {
+	} else if elementLen < (1 << 28) {
 		return []byte{
 			byte(0xE0 | (elementLen >> 24)),
 			byte((elementLen >> 16) & 0xFF),
@@ -758,22 +771,37 @@ func (enc *Encoder) writeStreamGroups(groups []*model.StreamGroup, version uint)
 	return nil
 }
 
-// encodeListPackInt encodes an integer for listpack
+// encodeListPackInt encodes an integer for listpack, following the exact
+// ranges and wire format the decoder (and Redis) expect:
+//
+//	0..127               -> 0xxxxxxx                       (int7 unsigned)
+//	-4096..4095          -> 110xxxxx yyyyyyyy               (int13 signed)
+//	-32768..32767        -> 11110001 + int16 little-endian
+//	-2^23..2^23-1        -> 11110010 + int24 little-endian
+//	-2^31..2^31-1        -> 11110011 + int32 little-endian
+//	otherwise            -> 11110100 + int64 little-endian
+//
+// Negative values are never emitted in the int7 form: bytes 0x80..0xBF would
+// collide with other prefixes. int13 is the smallest signed container.
 func (enc *Encoder) encodeListPackInt(val int64) []byte {
-	if val >= -127 && val <= 127 {
-		// 0xxxxxxx, uint7
+	if val >= 0 && val <= 127 {
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
-		// 110xxxxx yyyyyyyy, int13
-		uval := uint16(val)
+	} else if val >= -4096 && val <= 4095 {
+		// int13 (matching the decoder and Redis lpEncodeInteger):
+		// non-negative 0..4095 map to wire 0..4095; negatives -4096..-1
+		// map to wire 4096..8191 (wire = 8192 + val), keeping the 5-bit
+		// prefix in 0xC0..0xDF.
+		var uval uint16
 		if val < 0 {
-			uval = uint16(8191 + val + 1)
+			uval = uint16(8192 + val)
+		} else {
+			uval = uint16(val)
 		}
 		return []byte{
-			byte(0xC0 | (uval >> 8)),
+			byte(0xC0 | byte(uval>>8)),
 			byte(uval & 0xFF),
 		}
-	} else if val >= -32767 && val <= 32767 {
+	} else if val >= -32768 && val <= 32767 {
 		// 11110001 aaaaaaaa bbbbbbbb, int16
 		uval := uint16(val)
 		return []byte{
@@ -781,7 +809,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte(uval & 0xFF),
 			byte(uval >> 8),
 		}
-	} else if val >= -8388607 && val <= 8388607 {
+	} else if val >= -(1<<23) && val <= (1<<23)-1 {
 		// 11110010 aaaaaaaa bbbbbbbb cccccccc, int24
 		uval := uint32(val)
 		return []byte{
@@ -790,7 +818,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte((uval >> 8) & 0xFF),
 			byte((uval >> 16) & 0xFF),
 		}
-	} else if val >= -2147483647 && val <= 2147483647 {
+	} else if val >= -(1<<31) && val <= (1<<31)-1 {
 		// 11110011 aaaaaaaa bbbbbbbb cccccccc dddddddd, int32
 		uval := uint32(val)
 		return []byte{
