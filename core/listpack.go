@@ -87,11 +87,9 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 		if err != nil {
 			return nil, 0, 0, err
 		}
-		val := ((uint(header) & 0x1F) << 8) | uint(next)
-		if val >= uint(1<<12) {
-			val = -(8191 - val) - 1 // val is uint, must use -(8191 - val), val - 8191 will cause overflow
-		}
-		result := int64(val)
+		payload := ((uint(header) & 0x1F) << 8) | uint(next)
+		// int13 stores value + 4096 in a 13-bit unsigned payload.
+		result := int64(payload) - 4096
 		var contentLen uint32 = 2
 		backlen := getBackLen(contentLen)
 		*cursor += int(backlen)

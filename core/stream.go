@@ -3,7 +3,7 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
-	"strconv"
+	"sort"
 
 	"github.com/hdt3213/rdb/model"
 )
@@ -204,9 +204,12 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 			}
 			msg.Fields[fieldName] = unsafeBytes2Str(fieldValue)
 		}
-		// read lp count
-		if _, err = dec.readListPackEntryAsString(buf, cursor); err != nil {
-			return nil, fmt.Errorf("read fields end flag failed: %v", err)
+		// Tombstones (field count zero) carry no trailing end flag;
+		// regular messages end with the field count repeated as a string.
+		if fieldNum > 0 || !msg.Deleted {
+			if _, err = dec.readListPackEntryAsString(buf, cursor); err != nil {
+				return nil, fmt.Errorf("read fields end flag failed: %v", err)
+			}
 		}
 		msgs = append(msgs, msg)
 	}
@@ -483,12 +486,15 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 	// Add master field names
 	entries = append(entries, listpackEntry{intVal: int64(len(entry.Fields))})
 	for _, field := range entry.Fields {
-		entries = append(entries, listpackEntry{strVal: field})
+		entries = append(entries, listpackEntry{strVal: field, isStr: true})
 	}
-	// Add field count for master entry (this is what the decoder reads as "end flag")
-	entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(entry.Fields))})
+	// Master-entry end flag: the field count repeated as an integer
+	// (the decoder reads it back via readListPackEntryAsString).
+	entries = append(entries, listpackEntry{intVal: int64(len(entry.Fields))})
 
-	// Add messages
+	// Add messages. Layout: flag, ms-delta, seq-delta, then either
+	// [field-count, name/value pairs..., end-flag] for regular messages or
+	// [field-count 0, end-flag 0] for tombstones.
 	for _, msg := range entry.Msgs {
 		// Calculate flag
 		flag := StreamItemFlagNone
@@ -519,6 +525,13 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 		entries = append(entries, listpackEntry{intVal: msDiff})
 		entries = append(entries, listpackEntry{intVal: seqDiff})
 
+		if msg.Deleted {
+			// Tombstone layout: flag, ms-delta, seq-delta, count 0.
+			// There is no end-flag listpack element for tombstones.
+			entries = append(entries, listpackEntry{intVal: 0})
+			continue
+		}
+
 		// Add field count if not same fields
 		if flag&StreamItemFlagSameFields == 0 {
 			entries = append(entries, listpackEntry{intVal: int64(len(msg.Fields))})
@@ -529,18 +542,24 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 			// Use master field names order
 			for _, field := range entry.Fields {
 				value := msg.Fields[field]
-				entries = append(entries, listpackEntry{strVal: value})
+				entries = append(entries, listpackEntry{strVal: value, isStr: true})
 			}
 		} else {
-			// Add field names and values
-			for fieldName, fieldValue := range msg.Fields {
-				entries = append(entries, listpackEntry{strVal: fieldName})
-				entries = append(entries, listpackEntry{strVal: fieldValue})
+			// Add field names and values. msg.Fields is a map, so sort
+			// names to keep the produced listpack deterministic.
+			fieldNames := make([]string, 0, len(msg.Fields))
+			for fieldName := range msg.Fields {
+				fieldNames = append(fieldNames, fieldName)
+			}
+			sort.Strings(fieldNames)
+			for _, fieldName := range fieldNames {
+				entries = append(entries, listpackEntry{strVal: fieldName, isStr: true})
+				entries = append(entries, listpackEntry{strVal: msg.Fields[fieldName], isStr: true})
 			}
 		}
 
-		// Add field count for this message (this is what the decoder reads as "end flag")
-		entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(msg.Fields))})
+		// Per-message end flag repeated as an integer entry.
+		entries = append(entries, listpackEntry{intVal: int64(len(msg.Fields))})
 	}
 
 	// Build listpack with proper backlen values
@@ -558,6 +577,7 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 type listpackEntry struct {
 	intVal int64
 	strVal string
+	isStr  bool // explicit kind marker: empty string is still a string entry
 }
 
 // buildListpackWithBacklen builds a proper listpack with backlen values
@@ -568,7 +588,7 @@ func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
 	// First pass: encode entries and calculate sizes
 	for _, entry := range entries {
 		var encoded []byte
-		if entry.strVal != "" {
+		if entry.isStr {
 			encoded = enc.encodeListPackString(entry.strVal)
 		} else {
 			encoded = enc.encodeListPackInt(entry.intVal)
@@ -577,28 +597,26 @@ func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
 		entrySizes = append(entrySizes, uint32(len(encoded)))
 	}
 
-	// Second pass: add backlen values
+	// Interleave every encoded entry with its trailing backlen. Each
+	// backlen encodes the length (encoding+content) of the preceding entry.
 	var finalListpack []byte
-	for i := len(entries) - 1; i >= 0; i-- {
-		// Add backlen
+	offset := 0
+	for i := range entries {
 		backlen := enc.encodeBacklen(entrySizes[i])
-		finalListpack = append(backlen, finalListpack...)
-		// Add entry
-		entryStart := 0
-		for j := 0; j < i; j++ {
-			entryStart += int(entrySizes[j])
-		}
-		entryEnd := entryStart + int(entrySizes[i])
-		finalListpack = append(listpackData[entryStart:entryEnd], finalListpack...)
+		finalListpack = append(finalListpack, listpackData[offset:offset+int(entrySizes[i])]...)
+		finalListpack = append(finalListpack, backlen...)
+		offset += int(entrySizes[i])
 	}
 
-	// Add header
-	totalBytes := len(finalListpack) + 6 // 6 bytes for header
+	// Listpack layout: total-bytes(4) num-elements(2) entries ... 0xFF end.
+	totalBytes := uint32(6 + len(finalListpack) + 1)
 	header := make([]byte, 6)
-	binary.LittleEndian.PutUint32(header[0:4], uint32(totalBytes))
+	binary.LittleEndian.PutUint32(header[0:4], totalBytes)
 	binary.LittleEndian.PutUint16(header[4:6], uint16(len(entries)))
 
-	return append(header, finalListpack...)
+	result := append(header, finalListpack...)
+	result = append(result, 0xFF)
+	return result
 }
 
 // encodeBacklen encodes a backlen value
@@ -763,14 +781,13 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 	if val >= -127 && val <= 127 {
 		// 0xxxxxxx, uint7
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
-		// 110xxxxx yyyyyyyy, int13
-		uval := uint16(val)
-		if val < 0 {
-			uval = uint16(8191 + val + 1)
-		}
+	} else if val >= -4096 && val <= 4095 {
+		// 110xxxxx yyyyyyyy, int13. The 13-bit payload (big-endian across
+		// the low 5 bits of the first byte and the second byte) stores
+		// value + 4096, so the range is -4096..4095.
+		uval := uint16(val+4096) & 0x1FFF
 		return []byte{
-			byte(0xC0 | (uval >> 8)),
+			byte(0xC0 | byte(uval>>8)),
 			byte(uval & 0xFF),
 		}
 	} else if val >= -32767 && val <= 32767 {

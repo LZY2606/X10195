@@ -160,6 +160,15 @@ var (
 	xaddCmd = []byte("XADD")
 )
 
+// LexOrderOption marks AOF command generation to emit hash fields in
+// lexicographic order, so conversion output is deterministic.
+type LexOrderOption struct{}
+
+// WithLexOrder enables deterministic lexicographic field ordering in AOF.
+func WithLexOrder() LexOrderOption {
+	return LexOrderOption{}
+}
+
 func formatStreamID(streamID *model.StreamId) string {
 	ms := strconv.FormatUint(streamID.Ms, 10)
 	seq := strconv.FormatUint(streamID.Sequence, 10)
@@ -200,7 +209,7 @@ func ObjectToCmd(obj model.RedisObject, opts ...interface{}) []CmdLine {
 	useLexOrder := false
 	for _, o := range opts {
 		switch o.(type) {
-		case lexOrder:
+		case lexOrder, LexOrderOption:
 			useLexOrder = true
 		}
 	}
