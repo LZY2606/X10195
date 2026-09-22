@@ -604,3 +604,18 @@ func (dec *Decoder) Parse(cb func(object model.RedisObject) bool) (err error) {
 func (dec *Decoder) GetReadCount() int {
 	return dec.readCount
 }
+
+// GetRDBVersion returns RDB version parsed from file header.
+// It returns 0 before Parse is called. The result is negative for Valkey
+// files so that callers can distinguish them from Redis files (e.g. -80).
+func (dec *Decoder) GetRDBVersion() int {
+	if dec.valkey {
+		return -dec.rdbVersion
+	}
+	return dec.rdbVersion
+}
+
+// IsValkey reports whether the input file uses the VALKEY magic header.
+func (dec *Decoder) IsValkey() bool {
+	return dec.valkey
+}
