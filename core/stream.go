@@ -760,14 +760,14 @@ func (enc *Encoder) writeStreamGroups(groups []*model.StreamGroup, version uint)
 
 // encodeListPackInt encodes an integer for listpack
 func (enc *Encoder) encodeListPackInt(val int64) []byte {
-	if val >= -127 && val <= 127 {
+	if val >= 0 && val <= 127 {
 		// 0xxxxxxx, uint7
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
+	} else if val >= -4096 && val <= 4095 {
 		// 110xxxxx yyyyyyyy, int13
 		uval := uint16(val)
 		if val < 0 {
-			uval = uint16(8191 + val + 1)
+			uval = uint16(8192 + val)
 		}
 		return []byte{
 			byte(0xC0 | (uval >> 8)),

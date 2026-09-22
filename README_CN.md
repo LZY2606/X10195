@@ -735,3 +735,20 @@ func main() {
 |AOF|25s|53.24MB/s|
 |Top10|6s|221.87MB/s|
 |Prefix|25s|53.24MB/s|
+
+# Fixture 验证
+
+`verify.sh` 是项目级 fixture 门禁。它自动收集仓库中所有 `.rdb`
+fixture（不使用固定文件清单），对每个文件执行解码、重编码、二次解码
+和语义比较，并对支持 AOF 转换的对象检查转换结果的结构，全过程不依赖
+Redis 进程。encoder 无法无损表示的内容（例如 function library 或编码
+变化）会生成结构化的 expected-loss 记录；任何意料之外的问题都是
+blocker 并使门禁失败。
+
+预期失败的 fixture 必须在 `verify/manifest.json` 中显式声明原因和
+预期错误阶段（`decode`、`reencode`、`redecode`、`compare` 或 `aof`），
+只有 manifest 精确命中时门禁才能通过。
+
+```sh
+./verify.sh
+```

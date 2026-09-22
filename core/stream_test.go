@@ -375,3 +375,35 @@ func decodeStreamObject(t *testing.T, buf *bytes.Buffer, stream *model.StreamObj
 		}
 	}
 }
+
+func TestEncodeListPackIntBoundaries(t *testing.T) {
+	values := []int64{
+		0, 1, 127, 128,
+		-1, -127, -128,
+		4095, 4096, 4339,
+		-4096, -4097,
+		8191, 8192, -8191, -8192,
+		32767, 32768, -32767, -32768,
+		8388607, 8388608, -8388607, -8388608,
+		2147483647, 2147483648, -2147483647, -2147483648,
+	}
+	var buf bytes.Buffer
+	encoder := NewEncoder(&buf)
+	entries := make([]listpackEntry, len(values))
+	for i, v := range values {
+		entries[i] = listpackEntry{intVal: v}
+	}
+	listpackData := encoder.buildListpackWithBacklen(entries)
+	// skip the 6 byte listpack header
+	cursor := 6
+	decoder := NewDecoder(bytes.NewReader(nil))
+	for i, expect := range values {
+		actual, err := decoder.readListPackEntryAsInt(listpackData, &cursor)
+		if err != nil {
+			t.Fatalf("decode value %d failed: %v", expect, err)
+		}
+		if actual != expect {
+			t.Errorf("value %d round trip failed, got %d (index %d)", expect, actual, i)
+		}
+	}
+}

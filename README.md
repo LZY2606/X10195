@@ -808,3 +808,22 @@ Tested on MacBook Air（M2，2022年）, using  a 1.3 GB RDB file encoded with 
 |AOF|25s|53.24MB/s|
 |Top10|6s|221.87MB/s|
 |Prefix|25s|53.24MB/s|
+
+# Fixture Verification
+
+`verify.sh` is the project level fixture gate. It automatically collects
+every `.rdb` fixture in the repository (no hard-coded file list) and, for
+each file, runs decode, re-encode, re-decode and a semantic comparison,
+plus a structural check of the AOF conversion, all without a Redis
+process. Losses the encoder cannot avoid (for example function libraries
+or encoding changes) are reported as structured expected-loss records;
+anything unexpected is a blocker and fails the gate.
+
+Fixtures that are expected to fail must be declared in
+`verify/manifest.json` with a reason and the exact expected failure
+phase (`decode`, `reencode`, `redecode`, `compare` or `aof`); the gate
+only passes when the manifest hits exactly.
+
+```sh
+./verify.sh
+```
