@@ -3,7 +3,6 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
-	"strconv"
 
 	"github.com/hdt3213/rdb/model"
 )
@@ -148,9 +147,9 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 		}
 		masterFieldNames[i] = string(name)
 	}
-	// read lp count of master entry
-	if _, err = dec.readListPackEntryAsString(buf, cursor); err != nil {
-		return nil, fmt.Errorf("read fields end flag failed: %v", err)
+	// Redis always appends a 0 integer after the master field names
+	if _, err = dec.readListPackEntryAsInt(buf, cursor); err != nil {
+		return nil, fmt.Errorf("read master end flag failed: %v", err)
 	}
 
 	total := count + deleted
@@ -173,6 +172,9 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 			Ms:       uint64(ms + int64(firstId.Ms)),
 			Sequence: uint64(seq + int64(firstId.Sequence)),
 		}
+		// the trailing integer counts the listpack elements of this record
+		// excluding itself: flag, ms-diff, seq-diff plus the field elements
+		trailing := int64(3)
 		fieldNum := masterFieldNum
 		if flag&StreamItemFlagSameFields == 0 {
 			fieldNum0, err := dec.readListPackEntryAsInt(buf, cursor)
@@ -180,10 +182,13 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 				return nil, fmt.Errorf("read stream item field number failed: %v", err)
 			}
 			fieldNum = int(fieldNum0)
+			trailing += 1 + int64(fieldNum)*2 // field count, names and values
+		} else {
+			trailing += int64(fieldNum) // values only
 		}
 		msg := &model.StreamMessage{
 			Id:      msgId,
-			Fields:  make(map[string]string, masterFieldNum),
+			Fields:  make(map[string]string, fieldNum),
 			Deleted: flag&StreamItemFlagDeleted > 0,
 		}
 
@@ -204,9 +209,12 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 			}
 			msg.Fields[fieldName] = unsafeBytes2Str(fieldValue)
 		}
-		// read lp count
-		if _, err = dec.readListPackEntryAsString(buf, cursor); err != nil {
-			return nil, fmt.Errorf("read fields end flag failed: %v", err)
+		endFlag, err := dec.readListPackEntryAsInt(buf, cursor)
+		if err != nil {
+			return nil, fmt.Errorf("read stream item end flag failed: %v", err)
+		}
+		if endFlag != trailing {
+			return nil, fmt.Errorf("stream item end flag mismatch: expect %d, got %d", trailing, endFlag)
 		}
 		msgs = append(msgs, msg)
 	}
@@ -446,7 +454,8 @@ func (enc *Encoder) writeStreamEntries(entries []*model.StreamEntry) error {
 		header := make([]byte, 16)
 		binary.BigEndian.PutUint64(header[0:8], entry.FirstMsgId.Ms)
 		binary.BigEndian.PutUint64(header[8:16], entry.FirstMsgId.Sequence)
-		err = enc.writeString(unsafeBytes2Str(header))
+		// rax node keys are opaque 16-byte ids, must never use integer string encoding
+		err = enc.writeNanString(unsafeBytes2Str(header))
 		if err != nil {
 			return err
 		}
@@ -483,21 +492,18 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 	// Add master field names
 	entries = append(entries, listpackEntry{intVal: int64(len(entry.Fields))})
 	for _, field := range entry.Fields {
-		entries = append(entries, listpackEntry{strVal: field})
+		entries = append(entries, listpackEntry{strVal: field, forceString: true})
 	}
-	// Add field count for master entry (this is what the decoder reads as "end flag")
-	entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(entry.Fields))})
-
+	// Redis always appends a 0 integer after the master field names
+	entries = append(entries, listpackEntry{intVal: 0})
 	// Add messages
 	for _, msg := range entry.Msgs {
 		// Calculate flag
 		flag := StreamItemFlagNone
 		if msg.Deleted {
 			flag |= StreamItemFlagDeleted
-		}
-
-		// Check if message uses same fields as master
-		if len(msg.Fields) == len(entry.Fields) {
+		} else if len(msg.Fields) == len(entry.Fields) {
+			// Check if message uses same fields as master
 			sameFields := true
 			for _, field := range entry.Fields {
 				if _, exists := msg.Fields[field]; !exists {
@@ -519,35 +525,42 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 		entries = append(entries, listpackEntry{intVal: msDiff})
 		entries = append(entries, listpackEntry{intVal: seqDiff})
 
+		sameFields := flag&StreamItemFlagSameFields > 0
+		// trailing count covers flag, ms-diff, seq-diff and the field elements
+		trailing := int64(3)
+
 		// Add field count if not same fields
-		if flag&StreamItemFlagSameFields == 0 {
+		if !sameFields {
 			entries = append(entries, listpackEntry{intVal: int64(len(msg.Fields))})
+			trailing += 1 + int64(len(msg.Fields))*2
+		} else {
+			trailing += int64(len(msg.Fields))
 		}
 
 		// Add fields
-		if flag&StreamItemFlagSameFields > 0 {
+		if sameFields {
 			// Use master field names order
 			for _, field := range entry.Fields {
 				value := msg.Fields[field]
-				entries = append(entries, listpackEntry{strVal: value})
+				entries = append(entries, listpackEntry{strVal: value, forceString: true})
 			}
 		} else {
 			// Add field names and values
 			for fieldName, fieldValue := range msg.Fields {
-				entries = append(entries, listpackEntry{strVal: fieldName})
-				entries = append(entries, listpackEntry{strVal: fieldValue})
+				entries = append(entries, listpackEntry{strVal: fieldName, forceString: true})
+				entries = append(entries, listpackEntry{strVal: fieldValue, forceString: true})
 			}
 		}
+		entries = append(entries, listpackEntry{intVal: trailing})
 
-		// Add field count for this message (this is what the decoder reads as "end flag")
-		entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(msg.Fields))})
 	}
 
 	// Build listpack with proper backlen values
 	listpackData := enc.buildListpackWithBacklen(entries)
 
 	// Write the complete listpack
-	err := enc.writeString(unsafeBytes2Str(listpackData))
+	// listpack bytes are opaque and must be length-prefixed as a raw string
+	err := enc.writeNanString(unsafeBytes2Str(listpackData))
 	if err != nil {
 		return err
 	}
@@ -558,6 +571,8 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 type listpackEntry struct {
 	intVal int64
 	strVal string
+	// forceString encodes strVal as a listpack string even when it is numeric/empty
+	forceString bool
 }
 
 // buildListpackWithBacklen builds a proper listpack with backlen values
@@ -568,7 +583,9 @@ func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
 	// First pass: encode entries and calculate sizes
 	for _, entry := range entries {
 		var encoded []byte
-		if entry.strVal != "" {
+		if entry.forceString {
+			encoded = enc.encodeListPackString(entry.strVal)
+		} else if entry.strVal != "" {
 			encoded = enc.encodeListPackString(entry.strVal)
 		} else {
 			encoded = enc.encodeListPackInt(entry.intVal)
@@ -577,23 +594,17 @@ func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
 		entrySizes = append(entrySizes, uint32(len(encoded)))
 	}
 
-	// Second pass: add backlen values
+	// Second pass: append each encoded entry followed by its own backlen
 	var finalListpack []byte
-	for i := len(entries) - 1; i >= 0; i-- {
-		// Add backlen
-		backlen := enc.encodeBacklen(entrySizes[i])
-		finalListpack = append(backlen, finalListpack...)
-		// Add entry
-		entryStart := 0
-		for j := 0; j < i; j++ {
-			entryStart += int(entrySizes[j])
-		}
-		entryEnd := entryStart + int(entrySizes[i])
-		finalListpack = append(listpackData[entryStart:entryEnd], finalListpack...)
+	offset := 0
+	for i := range entries {
+		finalListpack = append(finalListpack, listpackData[offset:offset+int(entrySizes[i])]...)
+		offset += int(entrySizes[i])
+		finalListpack = append(finalListpack, enc.encodeBacklen(entrySizes[i])...)
 	}
-
-	// Add header
-	totalBytes := len(finalListpack) + 6 // 6 bytes for header
+	// listpack ends with a 0xFF terminator element with a one-byte backlen
+	finalListpack = append(finalListpack, 0xFF, 0x01)
+	totalBytes := len(finalListpack) + 6 // 6-byte header, entries and terminator
 	header := make([]byte, 6)
 	binary.LittleEndian.PutUint32(header[0:4], uint32(totalBytes))
 	binary.LittleEndian.PutUint16(header[4:6], uint16(len(entries)))
@@ -763,17 +774,14 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 	if val >= -127 && val <= 127 {
 		// 0xxxxxxx, uint7
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
-		// 110xxxxx yyyyyyyy, int13
-		uval := uint16(val)
-		if val < 0 {
-			uval = uint16(8191 + val + 1)
-		}
+	} else if val >= -4096 && val <= 4095 {
+		// 110xxxxx yyyyyyyy, signed 13-bit two's complement integer
+		uval := uint16(val) & 0x1FFF
 		return []byte{
 			byte(0xC0 | (uval >> 8)),
 			byte(uval & 0xFF),
 		}
-	} else if val >= -32767 && val <= 32767 {
+	} else if val >= -32768 && val <= 32767 {
 		// 11110001 aaaaaaaa bbbbbbbb, int16
 		uval := uint16(val)
 		return []byte{
@@ -781,7 +789,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte(uval & 0xFF),
 			byte(uval >> 8),
 		}
-	} else if val >= -8388607 && val <= 8388607 {
+	} else if val >= -8388608 && val <= 8388607 {
 		// 11110010 aaaaaaaa bbbbbbbb cccccccc, int24
 		uval := uint32(val)
 		return []byte{
@@ -790,7 +798,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte((uval >> 8) & 0xFF),
 			byte((uval >> 16) & 0xFF),
 		}
-	} else if val >= -2147483647 && val <= 2147483647 {
+	} else if val >= -2147483648 && val <= 2147483647 {
 		// 11110011 aaaaaaaa bbbbbbbb cccccccc dddddddd, int32
 		uval := uint32(val)
 		return []byte{
