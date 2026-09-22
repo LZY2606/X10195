@@ -760,10 +760,10 @@ func (enc *Encoder) writeStreamGroups(groups []*model.StreamGroup, version uint)
 
 // encodeListPackInt encodes an integer for listpack
 func (enc *Encoder) encodeListPackInt(val int64) []byte {
-	if val >= -127 && val <= 127 {
+	if val >= 0 && val <= 127 {
 		// 0xxxxxxx, uint7
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
+	} else if val >= -4096 && val <= 4095 {
 		// 110xxxxx yyyyyyyy, int13
 		uval := uint16(val)
 		if val < 0 {
@@ -773,7 +773,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte(0xC0 | (uval >> 8)),
 			byte(uval & 0xFF),
 		}
-	} else if val >= -32767 && val <= 32767 {
+	} else if val >= -32768 && val <= 32767 {
 		// 11110001 aaaaaaaa bbbbbbbb, int16
 		uval := uint16(val)
 		return []byte{
@@ -781,7 +781,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte(uval & 0xFF),
 			byte(uval >> 8),
 		}
-	} else if val >= -8388607 && val <= 8388607 {
+	} else if val >= -8388608 && val <= 8388607 {
 		// 11110010 aaaaaaaa bbbbbbbb cccccccc, int24
 		uval := uint32(val)
 		return []byte{
@@ -790,7 +790,7 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte((uval >> 8) & 0xFF),
 			byte((uval >> 16) & 0xFF),
 		}
-	} else if val >= -2147483647 && val <= 2147483647 {
+	} else if val >= -2147483648 && val <= 2147483647 {
 		// 11110011 aaaaaaaa bbbbbbbb cccccccc dddddddd, int32
 		uval := uint32(val)
 		return []byte{
