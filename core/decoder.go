@@ -49,6 +49,17 @@ func (dec *Decoder) WithSpecialType(moduleType string, f ModuleTypeHandleFunc) *
 	return dec
 }
 
+// GetRDBVersion returns the RDB version number read from the file header.
+// It returns 0 before Parse is called.
+func (dec *Decoder) GetRDBVersion() int {
+	return dec.rdbVersion
+}
+
+// IsValkey reports whether the file uses the VALKEY magic header.
+func (dec *Decoder) IsValkey() bool {
+	return dec.valkey
+}
+
 var magicNumberRedis = []byte("REDIS")
 var magicNumberValkey = []byte("VALKEY")
 
