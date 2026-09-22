@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"time"
 
@@ -26,6 +27,7 @@ type Decoder struct {
 
 	valkey     bool
 	rdbVersion int
+	dbIndexSet map[int]struct{}
 }
 
 // NewDecoder creates a new RDB decoder
@@ -34,7 +36,30 @@ func NewDecoder(reader io.Reader) *Decoder {
 	parser.input = bufio.NewReader(reader)
 	parser.buffer = make([]byte, 8)
 	parser.withSpecialTypes = make(map[string]ModuleTypeHandleFunc)
+	parser.dbIndexSet = make(map[int]struct{})
 	return parser
+}
+
+// GetRDBVersion returns the RDB version number parsed from the file header
+// (for example 11 for REDIS0011, 80 for VALKEY080). It returns 0 before Parse.
+func (dec *Decoder) GetRDBVersion() int {
+	return dec.rdbVersion
+}
+
+// IsValkey reports whether the file carries a VALKEY magic header instead of REDIS.
+func (dec *Decoder) IsValkey() bool {
+	return dec.valkey
+}
+
+// GetDBIndexes returns all database indexes referenced by SELECTDB opcodes,
+// in ascending order. Empty files without any SELECTDB return an empty slice.
+func (dec *Decoder) GetDBIndexes() []int {
+	result := make([]int, 0, len(dec.dbIndexSet))
+	for db := range dec.dbIndexSet {
+		result = append(result, db)
+	}
+	sort.Ints(result)
+	return result
 }
 
 // WithSpecialOpCode enables returning model.AuxObject to callback
@@ -173,6 +198,7 @@ func (dec *Decoder) checkHeader() error {
 
 func (dec *Decoder) readObject(flag byte, base *model.BaseObject) (model.RedisObject, error) {
 	base.Encoding = encodingMap[int(flag)]
+	base.RDBType = int(flag)
 	switch flag {
 	case typeString:
 		bs, err := dec.readString()
@@ -401,6 +427,10 @@ func (dec *Decoder) parse(cb func(object model.RedisObject) bool) error {
 				return err
 			}
 			dbIndex = int(dbIndex64)
+			if dec.dbIndexSet == nil {
+				dec.dbIndexSet = make(map[int]struct{})
+			}
+			dec.dbIndexSet[dbIndex] = struct{}{}
 			continue
 		} else if b == opCodeExpireTime {
 			err = dec.readFull(dec.buffer[:4])

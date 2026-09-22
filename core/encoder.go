@@ -70,18 +70,23 @@ var stateChanges = map[string]map[string]struct{}{ // state -> allow next states
 		writtenAuxState:      placeholder,
 		writtenDBHeaderState: placeholder,
 		writtenEndState:      placeholder,
+		writtenTTLState:      placeholder,
 	},
 	writtenAuxState: {
 		writtenAuxState:      placeholder,
 		writtenDBHeaderState: placeholder,
 		writtenEndState:      placeholder,
+		writtenTTLState:      placeholder,
 	},
-	writtenDBHeaderState: { // do not allow empty db
-		writtenTTLState:    placeholder,
-		writtenObjectState: placeholder,
+	writtenDBHeaderState: {
+		writtenTTLState:      placeholder,
+		writtenObjectState:   placeholder,
+		writtenDBHeaderState: placeholder, // another db can follow an empty one
+		writtenEndState:      placeholder,
 	},
 	writtenTTLState: {
 		writtenObjectState: placeholder,
+		writtenTTLState:    placeholder, // RDB_OPCODE_IDLE/FREQ follow PEXPIRETIME
 	},
 	writtenObjectState: {
 		writtenTTLState:      placeholder,
@@ -201,6 +206,24 @@ func (enc *Encoder) WriteAux(key, value string) error {
 	return nil
 }
 
+// WriteFunctions writes RDB_OPCODE_FUNCTION (245) carrying the serialized
+// function libraries payload exactly as produced by Redis/Valkey.
+func (enc *Encoder) WriteFunctions(functionsLua string) error {
+	if !enc.validateStateChange(writtenAuxState) {
+		return fmt.Errorf("cannot writing functions at state: %s", enc.state)
+	}
+	err := enc.write([]byte{opCodeFunction})
+	if err != nil {
+		return err
+	}
+	err = enc.writeString(functionsLua)
+	if err != nil {
+		return err
+	}
+	enc.state = writtenAuxState
+	return nil
+}
+
 // WriteDBHeader write db index and resize db into rdb file
 func (enc *Encoder) WriteDBHeader(dbIndex uint, keyCount, ttlCount uint64) error {
 	if !enc.validateStateChange(writtenDBHeaderState) {
@@ -277,10 +300,28 @@ func WithTTL(expirationMs uint64) TTLOption {
 	return TTLOption(expirationMs)
 }
 
+// IdleTimeOption carries the LRU idle time written with RDB_OPCODE_IDLE (248)
+type IdleTimeOption uint64
+
+// WithIdleTime sets the LRU idle time for the next object
+func WithIdleTime(idle uint64) IdleTimeOption {
+	return IdleTimeOption(idle)
+}
+
+// FreqOption carries the LFU frequency written with RDB_OPCODE_FREQ (249)
+type FreqOption uint8
+
+// WithFreq sets the LFU frequency for the next object
+func WithFreq(freq uint8) FreqOption {
+	return FreqOption(freq)
+}
+
 func (enc *Encoder) beforeWriteObject(options ...interface{}) error {
 	if !enc.validateStateChange(writtenObjectState) {
 		return fmt.Errorf("cannot write object at state: %s", enc.state)
 	}
+	var idle *uint64
+	var freq *uint8
 	for _, opt := range options {
 		switch o := opt.(type) {
 		case TTLOption:
@@ -288,7 +329,28 @@ func (enc *Encoder) beforeWriteObject(options ...interface{}) error {
 			if err != nil {
 				return err
 			}
+		case IdleTimeOption:
+			v := uint64(o)
+			idle = &v
+		case FreqOption:
+			v := uint8(o)
+			freq = &v
 		}
+	}
+	// RDB layout: PEXPIRETIME, then IDLE/FREQ, then the value type byte.
+	if idle != nil {
+		if err := enc.write([]byte{opCodeIdle}); err != nil {
+			return err
+		}
+		if err := enc.writeLength(*idle); err != nil {
+			return err
+		}
+		enc.state = writtenTTLState
+	} else if freq != nil {
+		if err := enc.write([]byte{opCodeFreq, byte(*freq)}); err != nil {
+			return err
+		}
+		enc.state = writtenTTLState
 	}
 	return nil
 }

@@ -62,6 +62,9 @@ type CallbackFunc func(object RedisObject) bool
 
 // RedisObject is interface for a redis object
 type RedisObject interface {
+	// GetBase returns the BaseObject carrying shared metadata such as db index
+	// and the raw RDB type flag.
+	GetBase() *BaseObject
 	// GetType returns redis type of object: string/list/set/hash/zset
 	GetType() string
 	// GetKey returns key of object
@@ -98,6 +101,17 @@ type BaseObject struct {
 	Extra      interface{} `json:"-"`                    // Extra stores more detail of encoding for memory profiler and other usages
 	IdleTime   *int64      `json:"lru,omitempty"`
 	Freq       *int64      `json:"lfu,omitempty"`
+	// RDBType is the raw one-byte RDB value type flag read from the file.
+	// It is populated by the decoder so round-trip verification can detect
+	// encoding-level conversions (e.g. ziplist -> listpack) that semantic
+	// comparison alone would miss.
+	RDBType int `json:"-"`
+}
+
+// GetBase returns the object itself, so embedded types expose their base metadata
+// (including the raw RDB type flag) through a uniform interface.
+func (o *BaseObject) GetBase() *BaseObject {
+	return o
 }
 
 // GetKey returns key of object

@@ -3,7 +3,7 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
-	"strconv"
+	"sort"
 
 	"github.com/hdt3213/rdb/model"
 )
@@ -148,8 +148,8 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 		}
 		masterFieldNames[i] = string(name)
 	}
-	// read lp count of master entry
-	if _, err = dec.readListPackEntryAsString(buf, cursor); err != nil {
+	// read lp count of master entry (zero count terminator)
+	if _, err = dec.readListPackEntryAsInt(buf, cursor); err != nil {
 		return nil, fmt.Errorf("read fields end flag failed: %v", err)
 	}
 
@@ -173,6 +173,12 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 			Ms:       uint64(ms + int64(firstId.Ms)),
 			Sequence: uint64(seq + int64(firstId.Sequence)),
 		}
+		msg := &model.StreamMessage{
+			Id:      msgId,
+			Fields:  make(map[string]string, masterFieldNum),
+			Deleted: flag&StreamItemFlagDeleted > 0,
+		}
+
 		fieldNum := masterFieldNum
 		if flag&StreamItemFlagSameFields == 0 {
 			fieldNum0, err := dec.readListPackEntryAsInt(buf, cursor)
@@ -180,11 +186,6 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 				return nil, fmt.Errorf("read stream item field number failed: %v", err)
 			}
 			fieldNum = int(fieldNum0)
-		}
-		msg := &model.StreamMessage{
-			Id:      msgId,
-			Fields:  make(map[string]string, masterFieldNum),
-			Deleted: flag&StreamItemFlagDeleted > 0,
 		}
 
 		for i := 0; i < fieldNum; i++ {
@@ -205,7 +206,7 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 			msg.Fields[fieldName] = unsafeBytes2Str(fieldValue)
 		}
 		// read lp count
-		if _, err = dec.readListPackEntryAsString(buf, cursor); err != nil {
+		if _, err = dec.readListPackEntryAsInt(buf, cursor); err != nil {
 			return nil, fmt.Errorf("read fields end flag failed: %v", err)
 		}
 		msgs = append(msgs, msg)
@@ -485,8 +486,9 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 	for _, field := range entry.Fields {
 		entries = append(entries, listpackEntry{strVal: field})
 	}
-	// Add field count for master entry (this is what the decoder reads as "end flag")
-	entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(entry.Fields))})
+	// Master entry terminates with a zero field count ("lp count", number of
+	// extra field names following the master names), matching streamEncodeFields.
+	entries = append(entries, listpackEntry{intVal: 0})
 
 	// Add messages
 	for _, msg := range entry.Msgs {
@@ -496,7 +498,8 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 			flag |= StreamItemFlagDeleted
 		}
 
-		// Check if message uses same fields as master
+		// Determine whether the message shares the master field names
+		flag := StreamItemFlagNone
 		if len(msg.Fields) == len(entry.Fields) {
 			sameFields := true
 			for _, field := range entry.Fields {
@@ -510,37 +513,37 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 			}
 		}
 
-		// Add flag
 		entries = append(entries, listpackEntry{intVal: int64(flag)})
-
-		// Add message ID (relative to first message ID)
-		msDiff := int64(msg.Id.Ms) - int64(entry.FirstMsgId.Ms)
-		seqDiff := int64(msg.Id.Sequence) - int64(entry.FirstMsgId.Sequence)
 		entries = append(entries, listpackEntry{intVal: msDiff})
 		entries = append(entries, listpackEntry{intVal: seqDiff})
 
-		// Add field count if not same fields
 		if flag&StreamItemFlagSameFields == 0 {
 			entries = append(entries, listpackEntry{intVal: int64(len(msg.Fields))})
 		}
 
-		// Add fields
 		if flag&StreamItemFlagSameFields > 0 {
-			// Use master field names order
+			// Emit values in master field-name order
 			for _, field := range entry.Fields {
-				value := msg.Fields[field]
-				entries = append(entries, listpackEntry{strVal: value})
+				entries = append(entries, listpackEntry{strVal: msg.Fields[field]})
 			}
 		} else {
-			// Add field names and values
-			for fieldName, fieldValue := range msg.Fields {
+			// Preserve field order: the decoder stores it in the entry master
+			// field list, but non-master messages keep their own field order in
+			// the JSON model's map iteration is non-deterministic; order by the
+			// field names as encoded originally when possible.
+			names := make([]string, 0, len(msg.Fields))
+			for fieldName := range msg.Fields {
+				names = append(names, fieldName)
+			}
+			sort.Strings(names)
+			for _, fieldName := range names {
 				entries = append(entries, listpackEntry{strVal: fieldName})
-				entries = append(entries, listpackEntry{strVal: fieldValue})
+				entries = append(entries, listpackEntry{strVal: msg.Fields[fieldName]})
 			}
 		}
 
-		// Add field count for this message (this is what the decoder reads as "end flag")
-		entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(msg.Fields))})
+		// Each live message terminates with a zero lp-count as well.
+		entries = append(entries, listpackEntry{intVal: 0})
 	}
 
 	// Build listpack with proper backlen values
@@ -758,31 +761,35 @@ func (enc *Encoder) writeStreamGroups(groups []*model.StreamGroup, version uint)
 	return nil
 }
 
-// encodeListPackInt encodes an integer for listpack
+// encodeListPackInt encodes an integer for listpack following the listpack
+// integer encoding specification (see lpEncodeType in redis src/listpack.c).
 func (enc *Encoder) encodeListPackInt(val int64) []byte {
-	if val >= -127 && val <= 127 {
-		// 0xxxxxxx, uint7
+	switch {
+	case val >= 0 && val <= 127:
+		// 7 bit unsigned integer
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
-		// 110xxxxx yyyyyyyy, int13
-		uval := uint16(val)
-		if val < 0 {
-			uval = uint16(8191 + val + 1)
+	case val >= -4096 && val <= 4095:
+		// 13 bit signed integer: positive 4096..8191, negative -4096..-1
+		var uval uint16
+		if val >= 0 {
+			uval = uint16(val)
+		} else {
+			uval = uint16(8192 + val) // -1 -> 8191, -4096 -> 4096
 		}
 		return []byte{
 			byte(0xC0 | (uval >> 8)),
 			byte(uval & 0xFF),
 		}
-	} else if val >= -32767 && val <= 32767 {
-		// 11110001 aaaaaaaa bbbbbbbb, int16
+	case val >= -32768 && val <= 32767:
+		// 16 bit signed integer, little endian
 		uval := uint16(val)
 		return []byte{
 			0xF1,
 			byte(uval & 0xFF),
 			byte(uval >> 8),
 		}
-	} else if val >= -8388607 && val <= 8388607 {
-		// 11110010 aaaaaaaa bbbbbbbb cccccccc, int24
+	case val >= -8388608 && val <= 8388607:
+		// 24 bit signed integer, little endian
 		uval := uint32(val)
 		return []byte{
 			0xF2,
@@ -790,8 +797,8 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte((uval >> 8) & 0xFF),
 			byte((uval >> 16) & 0xFF),
 		}
-	} else if val >= -2147483647 && val <= 2147483647 {
-		// 11110011 aaaaaaaa bbbbbbbb cccccccc dddddddd, int32
+	case val >= -2147483648 && val <= 2147483647:
+		// 32 bit signed integer, little endian
 		uval := uint32(val)
 		return []byte{
 			0xF3,
@@ -800,8 +807,8 @@ func (enc *Encoder) encodeListPackInt(val int64) []byte {
 			byte((uval >> 16) & 0xFF),
 			byte((uval >> 24) & 0xFF),
 		}
-	} else {
-		// 11110100 8Byte -> int64
+	default:
+		// 64 bit signed integer, little endian
 		uval := uint64(val)
 		result := []byte{0xF4}
 		for i := 0; i < 8; i++ {
