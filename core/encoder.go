@@ -201,6 +201,24 @@ func (enc *Encoder) WriteAux(key, value string) error {
 	return nil
 }
 
+// WriteFunctions writes a function library payload (RDB_OPCODE_FUNCTION, opcode 245).
+// Like WriteAux it must be called after WriteHeader and before WriteDBHeader.
+func (enc *Encoder) WriteFunctions(functionsLua string) error {
+	if !enc.validateStateChange(writtenAuxState) {
+		return fmt.Errorf("cannot writing functions at state: %s", enc.state)
+	}
+	err := enc.write([]byte{opCodeFunction})
+	if err != nil {
+		return err
+	}
+	err = enc.writeString(functionsLua)
+	if err != nil {
+		return err
+	}
+	enc.state = writtenAuxState
+	return nil
+}
+
 // WriteDBHeader write db index and resize db into rdb file
 func (enc *Encoder) WriteDBHeader(dbIndex uint, keyCount, ttlCount uint64) error {
 	if !enc.validateStateChange(writtenDBHeaderState) {
@@ -277,6 +295,22 @@ func WithTTL(expirationMs uint64) TTLOption {
 	return TTLOption(expirationMs)
 }
 
+// IdleOption carries LRU idle time metadata (RDB_OPCODE_IDLE, opcode 248)
+type IdleOption uint64
+
+// WithIdle carries LRU idle time metadata for the next object
+func WithIdle(idleTime uint64) IdleOption {
+	return IdleOption(idleTime)
+}
+
+// FreqOption carries LFU frequency metadata (RDB_OPCODE_FREQ, opcode 249)
+type FreqOption uint8
+
+// WithFreq carries LFU frequency metadata for the next object
+func WithFreq(freq uint8) FreqOption {
+	return FreqOption(freq)
+}
+
 func (enc *Encoder) beforeWriteObject(options ...interface{}) error {
 	if !enc.validateStateChange(writtenObjectState) {
 		return fmt.Errorf("cannot write object at state: %s", enc.state)
@@ -288,7 +322,29 @@ func (enc *Encoder) beforeWriteObject(options ...interface{}) error {
 			if err != nil {
 				return err
 			}
+		case IdleOption:
+			err := enc.writeIdle(uint64(o))
+			if err != nil {
+				return err
+			}
+		case FreqOption:
+			err := enc.writeFreq(byte(o))
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func (enc *Encoder) writeIdle(idleTime uint64) error {
+	err := enc.write([]byte{opCodeIdle})
+	if err != nil {
+		return err
+	}
+	return enc.writeLength(idleTime)
+}
+
+func (enc *Encoder) writeFreq(freq byte) error {
+	return enc.write([]byte{opCodeFreq, freq})
 }

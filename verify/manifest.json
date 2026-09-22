@@ -1,0 +1,10 @@
+{
+  "negatives": [
+    {
+      "path": "cases/negative_unknown_opcode_240.rdb",
+      "stage": "decode",
+      "reason": "synthetic fixture: opcode 240 is undefined in RDB versions up to 12, decoder must reject it instead of silently skipping"
+    }
+  ],
+  "expected_losses": []
+}

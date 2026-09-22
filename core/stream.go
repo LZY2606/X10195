@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/hdt3213/rdb/model"
@@ -173,8 +174,9 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 			Ms:       uint64(ms + int64(firstId.Ms)),
 			Sequence: uint64(seq + int64(firstId.Sequence)),
 		}
+		sameFields := flag&StreamItemFlagSameFields > 0
 		fieldNum := masterFieldNum
-		if flag&StreamItemFlagSameFields == 0 {
+		if !sameFields {
 			fieldNum0, err := dec.readListPackEntryAsInt(buf, cursor)
 			if err != nil {
 				return nil, fmt.Errorf("read stream item field number failed: %v", err)
@@ -183,29 +185,36 @@ func (dec *Decoder) readStreamEntryContent(buf []byte, cursor *int, firstId *mod
 		}
 		msg := &model.StreamMessage{
 			Id:      msgId,
-			Fields:  make(map[string]string, masterFieldNum),
+			Fields:  make(map[string]string),
 			Deleted: flag&StreamItemFlagDeleted > 0,
 		}
 
-		for i := 0; i < fieldNum; i++ {
-			var fieldName string
-			if flag&StreamItemFlagSameFields > 0 {
-				fieldName = masterFieldNames[i]
-			} else {
-				fieldNameBin, err := dec.readListPackEntryAsString(buf, cursor)
-				if err != nil {
-					return nil, fmt.Errorf("read stream item field name failed: %v", err)
+		if msg.Deleted {
+			// Tombstone entries only store flag, ID and field count on disk:
+			// there are no field/value pairs to read. The count must still
+			// be preserved so re-encoding can reproduce the exact listpack.
+			msg.NumFields = fieldNum
+		} else {
+			for i := 0; i < fieldNum; i++ {
+				var fieldName string
+				if sameFields {
+					fieldName = masterFieldNames[i]
+				} else {
+					fieldNameBin, err := dec.readListPackEntryAsString(buf, cursor)
+					if err != nil {
+						return nil, fmt.Errorf("read stream item field name failed: %v", err)
+					}
+					fieldName = unsafeBytes2Str(fieldNameBin)
 				}
-				fieldName = unsafeBytes2Str(fieldNameBin)
+				fieldValue, err := dec.readListPackEntryAsString(buf, cursor)
+				if err != nil {
+					return nil, fmt.Errorf("read stream item field value failed: %v", err)
+				}
+				msg.Fields[fieldName] = unsafeBytes2Str(fieldValue)
 			}
-			fieldValue, err := dec.readListPackEntryAsString(buf, cursor)
-			if err != nil {
-				return nil, fmt.Errorf("read stream item field value failed: %v", err)
-			}
-			msg.Fields[fieldName] = unsafeBytes2Str(fieldValue)
 		}
-		// read lp count
-		if _, err = dec.readListPackEntryAsString(buf, cursor); err != nil {
+		// read trailing lp count (always encoded as an integer)
+		if _, err = dec.readListPackEntryAsInt(buf, cursor); err != nil {
 			return nil, fmt.Errorf("read fields end flag failed: %v", err)
 		}
 		msgs = append(msgs, msg)
@@ -463,101 +472,100 @@ func (enc *Encoder) writeStreamEntries(entries []*model.StreamEntry) error {
 
 // writeStreamEntryContent writes a stream entry content as listpack
 func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
-	// Calculate total messages (including deleted ones)
-	totalMsgs := len(entry.Msgs)
+	// Serialize the listpack node following the real Redis NPL layout:
+	//   count, deleted, master-field-count, master fields..., field-count,
+	//   then per message: flag, ms-diff, seq-diff, [field-count],
+	//   field/value pairs..., field-count.
+	total := len(entry.Msgs)
 	deletedCount := 0
 	for _, msg := range entry.Msgs {
 		if msg.Deleted {
 			deletedCount++
 		}
 	}
-	validCount := totalMsgs - deletedCount
+	validCount := total - deletedCount
 
-	// Build listpack with proper backlen values
 	var entries []listpackEntry
-
-	// Add count and deleted count
 	entries = append(entries, listpackEntry{intVal: int64(validCount)})
 	entries = append(entries, listpackEntry{intVal: int64(deletedCount)})
 
-	// Add master field names
-	entries = append(entries, listpackEntry{intVal: int64(len(entry.Fields))})
-	for _, field := range entry.Fields {
-		entries = append(entries, listpackEntry{strVal: field})
+	masterFields := entry.Fields
+	entries = append(entries, listpackEntry{intVal: int64(len(masterFields))})
+	for _, field := range masterFields {
+		entries = append(entries, listpackEntry{strVal: field, isStr: true})
 	}
-	// Add field count for master entry (this is what the decoder reads as "end flag")
-	entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(entry.Fields))})
+	entries = append(entries, listpackEntry{intVal: int64(len(masterFields))})
 
-	// Add messages
 	for _, msg := range entry.Msgs {
-		// Calculate flag
 		flag := StreamItemFlagNone
 		if msg.Deleted {
 			flag |= StreamItemFlagDeleted
 		}
 
-		// Check if message uses same fields as master
-		if len(msg.Fields) == len(entry.Fields) {
-			sameFields := true
-			for _, field := range entry.Fields {
+		// The SAMEFIELDS optimization is only legal when the message field
+		// names match the master names exactly, in cardinality and content.
+		sameFields := len(msg.Fields) == len(masterFields)
+		if sameFields {
+			for _, field := range masterFields {
 				if _, exists := msg.Fields[field]; !exists {
 					sameFields = false
 					break
 				}
 			}
-			if sameFields {
-				flag |= StreamItemFlagSameFields
-			}
+		}
+		if sameFields {
+			flag |= StreamItemFlagSameFields
 		}
 
-		// Add flag
 		entries = append(entries, listpackEntry{intVal: int64(flag)})
+		entries = append(entries, listpackEntry{intVal: int64(msg.Id.Ms) - int64(entry.FirstMsgId.Ms)})
+		entries = append(entries, listpackEntry{intVal: int64(msg.Id.Sequence) - int64(entry.FirstMsgId.Sequence)})
 
-		// Add message ID (relative to first message ID)
-		msDiff := int64(msg.Id.Ms) - int64(entry.FirstMsgId.Ms)
-		seqDiff := int64(msg.Id.Sequence) - int64(entry.FirstMsgId.Sequence)
-		entries = append(entries, listpackEntry{intVal: msDiff})
-		entries = append(entries, listpackEntry{intVal: seqDiff})
-
-		// Add field count if not same fields
-		if flag&StreamItemFlagSameFields == 0 {
-			entries = append(entries, listpackEntry{intVal: int64(len(msg.Fields))})
+		numFields := len(msg.Fields)
+		if msg.Deleted {
+			// Tombstones only persist their field count; no pairs exist.
+			numFields = msg.NumFields
 		}
-
-		// Add fields
-		if flag&StreamItemFlagSameFields > 0 {
-			// Use master field names order
-			for _, field := range entry.Fields {
-				value := msg.Fields[field]
-				entries = append(entries, listpackEntry{strVal: value})
-			}
+		if !sameFields {
+			entries = append(entries, listpackEntry{intVal: int64(numFields)})
+		}
+		lpCount := numFields
+		if !sameFields {
+			lpCount = numFields*2 + 1
+		}
+		if msg.Deleted {
+			// No field/value pairs are stored for tombstone entries.
+			entries = append(entries, listpackEntry{intVal: int64(lpCount)})
+			continue
+		}
+		var fieldNames []string
+		if sameFields {
+			// SAMEFIELDS: only values are serialized, master names are reused.
+			fieldNames = masterFields
 		} else {
-			// Add field names and values
-			for fieldName, fieldValue := range msg.Fields {
-				entries = append(entries, listpackEntry{strVal: fieldName})
-				entries = append(entries, listpackEntry{strVal: fieldValue})
+			fieldNames = make([]string, 0, len(msg.Fields))
+			for name := range msg.Fields {
+				fieldNames = append(fieldNames, name)
 			}
+			sort.Strings(fieldNames)
 		}
-
-		// Add field count for this message (this is what the decoder reads as "end flag")
-		entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(msg.Fields))})
+		for _, name := range fieldNames {
+			if !sameFields {
+				entries = append(entries, listpackEntry{strVal: name, isStr: true})
+			}
+			entries = append(entries, listpackEntry{strVal: msg.Fields[name], isStr: true})
+		}
+		entries = append(entries, listpackEntry{intVal: int64(lpCount)})
 	}
 
-	// Build listpack with proper backlen values
 	listpackData := enc.buildListpackWithBacklen(entries)
-
-	// Write the complete listpack
-	err := enc.writeString(unsafeBytes2Str(listpackData))
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return enc.writeString(unsafeBytes2Str(listpackData))
 }
 
 type listpackEntry struct {
 	intVal int64
 	strVal string
+	isStr  bool
 }
 
 // buildListpackWithBacklen builds a proper listpack with backlen values
@@ -568,7 +576,7 @@ func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
 	// First pass: encode entries and calculate sizes
 	for _, entry := range entries {
 		var encoded []byte
-		if entry.strVal != "" {
+		if entry.isStr {
 			encoded = enc.encodeListPackString(entry.strVal)
 		} else {
 			encoded = enc.encodeListPackInt(entry.intVal)

@@ -40,6 +40,10 @@ type StreamMessage struct {
 	Id      *StreamId         `json:"id"`
 	Fields  map[string]string `json:"fields"`
 	Deleted bool              `json:"deleted"`
+	// NumFields is the on-disk field count for tombstone (Deleted) entries,
+	// whose field names and values are not stored in the RDB listpack. It is
+	// 0 for live messages, whose length equals len(Fields).
+	NumFields int `json:"numFields,omitempty"`
 }
 
 // StreamId is a 128-bit number composed of a milliseconds time and  a sequence counter
