@@ -1,0 +1,280 @@
+{
+  "negative": [
+    {
+      "path": "cases/unknown_opcode_246.rdb",
+      "reason": "Synthetic fixture with reserved/unimplemented RDB type byte 246; the parser must reject it at decode with \"unknown type flag\".",
+      "expected_stage": "decode",
+      "expected_error": "unknown"
+    }
+  ],
+  "expected_loss": [
+    {
+      "path": "cases/easily_compressible_string_key.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/empty_database.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/function.rdb",
+      "reason": "RDB_OPCODE_FUNCTION payload has no encoder writer; re-encoding is blocked structurally instead of silently dropping the library.",
+      "losses": [
+        "function-library"
+      ]
+    },
+    {
+      "path": "cases/hash.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/hash_as_listpack_with_hfe.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/hash_as_ziplist.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/hash_with_hfe.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/integer_keys.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/intset_16.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/intset_32.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/intset_64.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/issue27.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/keys_with_expiry.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/linkedlist.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/listpack.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/memory.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/multiple_databases.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/non_ascii_values.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/parser_filters.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/quicklist.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/rdb_version_5_with_checksum.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/rdb_version_8_with_64b_length_and_scores.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/regular_set.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/regular_sorted_set.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/sorted_set_as_ziplist.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/stream_listoacks_3.rdb",
+      "reason": "The AOF converter emits XADD only and cannot express consumer groups, consumers or PEL ownership. Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "aof-stream-metadata",
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/stream_listpacks_1.rdb",
+      "reason": "The AOF converter emits XADD only and cannot express consumer groups, consumers or PEL ownership. Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "aof-stream-metadata",
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/stream_listpacks_2.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/tree.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/uncompressible_string_keys.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/ziplist_that_compresses_easily.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/ziplist_that_doesnt_compress.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/ziplist_with_integers.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/zipmap_big_len.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/zipmap_that_compresses_easily.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/zipmap_that_doesnt_compress.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "cases/zipmap_with_big_values.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    },
+    {
+      "path": "examples/decode/example.rdb",
+      "reason": "Encoder always writes REDIS0011/VALKEY080; the original RDB version cannot be reproduced byte-faithfully, though all data semantics round-trip.",
+      "losses": [
+        "encoding-version"
+      ]
+    }
+  ]
+}

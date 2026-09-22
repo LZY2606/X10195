@@ -62,7 +62,7 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 		return nil, 0, 0, err
 	}
 	switch header >> 6 {
-	case 0, 1: // 0xxxxxxx, uint7
+	case 0, 1: // 0xxxxxxx, int7 (signed byte in the project's stream listpacks)
 		result := int64(int8(header))
 		var contentLen uint32 = 1
 		backlen := getBackLen(contentLen)
@@ -81,17 +81,19 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 	}
 	// assert header == 11xxxxxx
 	switch header >> 4 {
-	case 12, 13: // 110xxxxx yyyyyyyy, int13
+	case 12, 13: // 110xxxxx yyyyyyyy, int13: payloads 4096..8191 encode -4096..-1
 		// see https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/fba43c524524cbdb54955a28af228b513420d78d/src/listpack.c#L586
 		next, err := readByte(buf, cursor)
 		if err != nil {
 			return nil, 0, 0, err
 		}
 		val := ((uint(header) & 0x1F) << 8) | uint(next)
-		if val >= uint(1<<12) {
-			val = -(8191 - val) - 1 // val is uint, must use -(8191 - val), val - 8191 will cause overflow
+		var result int64
+		if val >= 4096 {
+			result = int64(val) - 8192
+		} else {
+			result = int64(val)
 		}
-		result := int64(val)
 		var contentLen uint32 = 2
 		backlen := getBackLen(contentLen)
 		*cursor += int(backlen)
