@@ -55,19 +55,38 @@ func getBackLen(elementLen uint32) uint32 {
 }
 
 
-// readListPackEntry returns: string content, int content, entry length(encoding+content+backlen), error
+// readListPackEntry returns: string content, int content, entry length(encoding+content+backlen), error.
+// Integer entries follow the canonical Redis listpack integer encodings:
+//
+//	0x00..0x0d        : immediate 0..12 (1 byte)
+//	0x0e, 0x0f        : 16-bit immediate -1..-32768 (3 bytes)
+//	0xf1..0xff        : 8-bit immediate -1..-13 (1 byte)
+//	0xe0              : 8-bit unsigned 13..255 (2 bytes)
+//	0xf0              : 16-bit signed (3 bytes)
+//	0x1c..0x1f        : int13/int16/int24/int32 (2..5 bytes)
+//	0xe1..0xea        : reserved/unused
 func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, uint32, error) {
 	header, err := readByte(buf, cursor)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	switch {
+	case header <= 0x0d: // immediate small non-negative integer
+		*cursor += int(getBackLen(1))
+		return nil, int64(header), 1 + getBackLen(1), nil
+	case header >= 0xf1 && header <= 0xff: // immediate small negative integer -1..-9...-13
+		*cursor += int(getBackLen(1))
+		return nil, int64(header) - 256, 1 + getBackLen(1), nil
+	case header == 0xe0: // 8-bit unsigned, 0..255 (only 13..255 emitted by redis)
+		v, err := readByte(buf, cursor)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		var contentLen uint32 = 2
+		*cursor += int(getBackLen(contentLen))
+		return nil, int64(v), contentLen + getBackLen(contentLen), nil
+	}
 	switch header >> 6 {
-	case 0, 1: // 0xxxxxxx, uint7
-		result := int64(int8(header))
-		var contentLen uint32 = 1
-		backlen := getBackLen(contentLen)
-		*cursor += int(backlen)
-		return nil, result, contentLen + backlen, nil
 	case 2: // 10xxxxxx + content, string(len<=63)
 		strLen := int(header & 0x3f)
 		result, err := readBytes(buf, cursor, strLen)
@@ -79,19 +98,20 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 		*cursor += int(backlen)
 		return result, 0, contentLen + backlen, nil
 	}
-	// assert header == 11xxxxxx
 	switch header >> 4 {
 	case 12, 13: // 110xxxxx yyyyyyyy, int13
-		// see https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/fba43c524524cbdb54955a28af228b513420d78d/src/listpack.c#L586
 		next, err := readByte(buf, cursor)
 		if err != nil {
 			return nil, 0, 0, err
 		}
-		val := ((uint(header) & 0x1F) << 8) | uint(next)
-		if val >= uint(1<<12) {
-			val = -(8191 - val) - 1 // val is uint, must use -(8191 - val), val - 8191 will cause overflow
+		// Redis zig-zag: even code = positive v/2, odd code = negative (v-1)/2
+		code := (uint(header&0x1F) << 8) | uint(next)
+		var result int64
+		if code&1 == 1 {
+			result = -int64((code + 1) >> 1)
+		} else {
+			result = int64(code >> 1)
 		}
-		result := int64(val)
 		var contentLen uint32 = 2
 		backlen := getBackLen(contentLen)
 		*cursor += int(backlen)
@@ -114,7 +134,7 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 	}
 	// assert header == 1111xxxx
 	switch header & 0x0f {
-	case 0: // 11110000 aaaaaaaa bbbbbbbb cccccccc dddddddd + content, string(len < 1<<32)
+	case 0: // 11110000 + 4-byte length + content, string(len < 1<<32)
 		var lenBytes []byte
 		lenBytes, err = readBytes(buf, cursor, 4)
 		if err != nil {
@@ -129,7 +149,7 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 		backlen := getBackLen(contentLen)
 		*cursor += int(backlen)
 		return result, 0, contentLen + backlen, nil
-	case 1: // 11110001 aaaaaaaa bbbbbbbb, int16
+	case 1: // 11110001 + 2 bytes, int16
 		var bs []byte
 		bs, err = readBytes(buf, cursor, 2)
 		if err != nil {
@@ -140,19 +160,22 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 		backlen := getBackLen(contentLen)
 		*cursor += int(backlen)
 		return nil, result, contentLen + backlen, nil
-	case 2: // 11110010 aaaaaaaa bbbbbbbb cccccccc, int24
+	case 2: // 11110010 + 3 bytes, int24
 		var bs []byte
 		bs, err = readBytes(buf, cursor, 3)
 		if err != nil {
 			return nil, 0, 0, err
 		}
-		bs = append([]byte{0}, bs...)
-		result := int64(int32(binary.LittleEndian.Uint32(bs))>>8)
+		u := uint32(bs[0]) | uint32(bs[1])<<8 | uint32(bs[2])<<16
+		if u&0x800000 != 0 {
+			u |= 0xFF000000
+		}
+		result := int64(int32(u))
 		var contentLen uint32 = 4
 		backlen := getBackLen(contentLen)
 		*cursor += int(backlen)
 		return nil, result, contentLen + backlen, nil
-	case 3: // 1111 0011 -> int32
+	case 3: // 11110011 + 4 bytes, int32
 		var bs []byte
 		bs, err = readBytes(buf, cursor, 4)
 		if err != nil {
@@ -163,7 +186,7 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 		backlen := getBackLen(contentLen)
 		*cursor += int(backlen)
 		return nil, result, contentLen + backlen, nil
-	case 4: // 11110100 8Byte -> int64
+	case 4: // 11110100 + 8 bytes, int64
 		var bs []byte
 		bs, err = readBytes(buf, cursor, 8)
 		if err != nil {
@@ -177,7 +200,7 @@ func (dec *Decoder) readListPackEntry(buf []byte, cursor *int) ([]byte, int64, u
 	case 15: // 11111111 -> end
 		return nil, 0, 0, errors.New("unexpected end")
 	}
-	return nil, 0, 0, fmt.Errorf("unknown entry header")
+	return nil, 0, 0, fmt.Errorf("unknown entry header: %#x", header)
 }
 
 // readListPackEntryAsString return a string representation of entry

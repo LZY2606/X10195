@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/hdt3213/rdb/model"
@@ -483,10 +484,10 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 	// Add master field names
 	entries = append(entries, listpackEntry{intVal: int64(len(entry.Fields))})
 	for _, field := range entry.Fields {
-		entries = append(entries, listpackEntry{strVal: field})
+		entries = append(entries, listpackEntry{strVal: field, isStr: true})
 	}
 	// Add field count for master entry (this is what the decoder reads as "end flag")
-	entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(entry.Fields))})
+	entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(entry.Fields)), isStr: true})
 
 	// Add messages
 	for _, msg := range entry.Msgs {
@@ -529,18 +530,23 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 			// Use master field names order
 			for _, field := range entry.Fields {
 				value := msg.Fields[field]
-				entries = append(entries, listpackEntry{strVal: value})
+				entries = append(entries, listpackEntry{strVal: value, isStr: true})
 			}
 		} else {
-			// Add field names and values
-			for fieldName, fieldValue := range msg.Fields {
-				entries = append(entries, listpackEntry{strVal: fieldName})
-				entries = append(entries, listpackEntry{strVal: fieldValue})
+			// Add field names and values in a deterministic order
+			fieldNames := make([]string, 0, len(msg.Fields))
+			for fieldName := range msg.Fields {
+				fieldNames = append(fieldNames, fieldName)
+			}
+			sort.Strings(fieldNames)
+			for _, fieldName := range fieldNames {
+				entries = append(entries, listpackEntry{strVal: fieldName, isStr: true})
+				entries = append(entries, listpackEntry{strVal: msg.Fields[fieldName], isStr: true})
 			}
 		}
 
 		// Add field count for this message (this is what the decoder reads as "end flag")
-		entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(msg.Fields))})
+		entries = append(entries, listpackEntry{strVal: strconv.Itoa(len(msg.Fields)), isStr: true})
 	}
 
 	// Build listpack with proper backlen values
@@ -558,78 +564,65 @@ func (enc *Encoder) writeStreamEntryContent(entry *model.StreamEntry) error {
 type listpackEntry struct {
 	intVal int64
 	strVal string
+	isStr  bool
 }
 
-// buildListpackWithBacklen builds a proper listpack with backlen values
+// buildListpackWithBacklen builds a proper listpack: each element is
+// encoded content followed by its little-endian backlen, then 0xFF.
 func (enc *Encoder) buildListpackWithBacklen(entries []listpackEntry) []byte {
-	var listpackData []byte
-	var entrySizes []uint32
-
-	// First pass: encode entries and calculate sizes
+	var body []byte
 	for _, entry := range entries {
 		var encoded []byte
-		if entry.strVal != "" {
+		if entry.isStr {
 			encoded = enc.encodeListPackString(entry.strVal)
 		} else {
 			encoded = enc.encodeListPackInt(entry.intVal)
 		}
-		listpackData = append(listpackData, encoded...)
-		entrySizes = append(entrySizes, uint32(len(encoded)))
+		body = append(body, encoded...)
+		body = append(body, enc.encodeBacklen(uint32(len(encoded)))...)
 	}
+	body = append(body, 0xFF)
 
-	// Second pass: add backlen values
-	var finalListpack []byte
-	for i := len(entries) - 1; i >= 0; i-- {
-		// Add backlen
-		backlen := enc.encodeBacklen(entrySizes[i])
-		finalListpack = append(backlen, finalListpack...)
-		// Add entry
-		entryStart := 0
-		for j := 0; j < i; j++ {
-			entryStart += int(entrySizes[j])
-		}
-		entryEnd := entryStart + int(entrySizes[i])
-		finalListpack = append(listpackData[entryStart:entryEnd], finalListpack...)
-	}
-
-	// Add header
-	totalBytes := len(finalListpack) + 6 // 6 bytes for header
+	totalBytes := len(body) + 6 // 4-byte total-bytes + 2-byte num-elements
 	header := make([]byte, 6)
 	binary.LittleEndian.PutUint32(header[0:4], uint32(totalBytes))
 	binary.LittleEndian.PutUint16(header[4:6], uint16(len(entries)))
 
-	return append(header, finalListpack...)
+	return append(header, body...)
 }
 
-// encodeBacklen encodes a backlen value
+// encodeBacklen encodes the little-endian backlen of a listpack entry.
+// Mirrors Redis lpEncodeBacklen: content length 0..127 -> 1 byte,
+// 128..16383 -> 2 bytes, 16384..2097151 -> 3 bytes,
+// 2097152..268435455 -> 4 bytes, otherwise 5 bytes.
 func (enc *Encoder) encodeBacklen(elementLen uint32) []byte {
 	if elementLen <= 127 {
 		return []byte{byte(elementLen)}
 	} else if elementLen < (1<<14)-1 {
 		return []byte{
-			byte(0x80 | (elementLen >> 8)),
 			byte(elementLen & 0xFF),
+			byte(0x80 | (elementLen >> 8)),
 		}
 	} else if elementLen < (1<<21)-1 {
 		return []byte{
-			byte(0xC0 | (elementLen >> 16)),
-			byte((elementLen >> 8) & 0xFF),
 			byte(elementLen & 0xFF),
+			byte((elementLen >> 8) & 0xFF),
+			byte(0xC0 | (elementLen >> 16)),
 		}
 	} else if elementLen < (1<<28)-1 {
 		return []byte{
-			byte(0xE0 | (elementLen >> 24)),
-			byte((elementLen >> 16) & 0xFF),
-			byte((elementLen >> 8) & 0xFF),
 			byte(elementLen & 0xFF),
+			byte((elementLen >> 8) & 0xFF),
+			byte((elementLen >> 16) & 0xFF),
+			byte(0xE0 | (elementLen >> 24)),
 		}
 	} else {
 		return []byte{
-			0xF0,
-			byte((elementLen >> 24) & 0xFF),
-			byte((elementLen >> 16) & 0xFF),
-			byte((elementLen >> 8) & 0xFF),
 			byte(elementLen & 0xFF),
+			byte((elementLen >> 8) & 0xFF),
+			byte((elementLen >> 16) & 0xFF),
+			byte((elementLen >> 24) & 0xFF),
+			0xF0,
 		}
 	}
 }
@@ -758,55 +751,51 @@ func (enc *Encoder) writeStreamGroups(groups []*model.StreamGroup, version uint)
 	return nil
 }
 
-// encodeListPackInt encodes an integer for listpack
+// encodeListPackInt encodes a value using the canonical Redis listpack
+// integer encodings (see lpEncodeInteger in src/listpack.c).
 func (enc *Encoder) encodeListPackInt(val int64) []byte {
-	if val >= -127 && val <= 127 {
-		// 0xxxxxxx, uint7
+	switch {
+	case val >= 0 && val <= 12: // 0x00..0x0d immediate
 		return []byte{byte(val)}
-	} else if val >= -8191 && val <= 8191 {
-		// 110xxxxx yyyyyyyy, int13
-		uval := uint16(val)
-		if val < 0 {
-			uval = uint16(8191 + val + 1)
+	case val >= -13 && val < 0: // 0xf1..0xff immediate
+		return []byte{byte(256 + val)}
+	case val >= 13 && val <= 255: // 0xe0 + uint8
+		return []byte{0xe0, byte(val)}
+	case val >= -4096 && val <= 4095: // 110xxxxx yyyyyyyy, int13 zig-zag
+		var code uint16
+		if val >= 0 {
+			code = uint16(val) << 1
+		} else {
+			code = uint16((-val)<<1 - 1)
 		}
 		return []byte{
-			byte(0xC0 | (uval >> 8)),
-			byte(uval & 0xFF),
+			byte(0xC0 | (code >> 8)),
+			byte(code & 0xFF),
 		}
-	} else if val >= -32767 && val <= 32767 {
-		// 11110001 aaaaaaaa bbbbbbbb, int16
-		uval := uint16(val)
-		return []byte{
-			0xF1,
-			byte(uval & 0xFF),
-			byte(uval >> 8),
-		}
-	} else if val >= -8388607 && val <= 8388607 {
-		// 11110010 aaaaaaaa bbbbbbbb cccccccc, int24
-		uval := uint32(val)
-		return []byte{
-			0xF2,
-			byte(uval & 0xFF),
-			byte((uval >> 8) & 0xFF),
-			byte((uval >> 16) & 0xFF),
-		}
-	} else if val >= -2147483647 && val <= 2147483647 {
-		// 11110011 aaaaaaaa bbbbbbbb cccccccc dddddddd, int32
-		uval := uint32(val)
-		return []byte{
-			0xF3,
-			byte(uval & 0xFF),
-			byte((uval >> 8) & 0xFF),
-			byte((uval >> 16) & 0xFF),
-			byte((uval >> 24) & 0xFF),
-		}
-	} else {
-		// 11110100 8Byte -> int64
-		uval := uint64(val)
-		result := []byte{0xF4}
+	case val >= -32768 && val <= 32767: // 0xf0 + int16
+		bs := make([]byte, 3)
+		bs[0] = 0xf0
+		binary.LittleEndian.PutUint16(bs[1:], uint16(val))
+		return bs
+	case val >= -8388608 && val <= 8388607: // 0xf2 + int24
+		bs := make([]byte, 4)
+		bs[0] = 0xf2
+		u := uint32(val)
+		bs[1] = byte(u & 0xFF)
+		bs[2] = byte((u >> 8) & 0xFF)
+		bs[3] = byte((u >> 16) & 0xFF)
+		return bs
+	case val >= -2147483648 && val <= 2147483647: // 0xf3 + int32
+		bs := make([]byte, 5)
+		bs[0] = 0xf3
+		binary.LittleEndian.PutUint32(bs[1:], uint32(val))
+		return bs
+	default: // 0xf4 + int64
+		result := []byte{0xf4}
+		u := uint64(val)
 		for i := 0; i < 8; i++ {
-			result = append(result, byte(uval&0xFF))
-			uval >>= 8
+			result = append(result, byte(u&0xFF))
+			u >>= 8
 		}
 		return result
 	}
