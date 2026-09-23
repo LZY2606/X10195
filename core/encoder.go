@@ -55,6 +55,7 @@ const (
 	writtenHeaderState   = "WrittenHeader"
 	writtenDBHeaderState = "writtenHeader"
 	writtenAuxState      = "WrittenAux"
+	writtenFunctionState = "WrittenFunction"
 	writtenTTLState      = "WrittenTTL"
 	writtenObjectState   = "WrittenObject"
 	writtenEndState      = "WritingEnd"
@@ -68,11 +69,18 @@ var stateChanges = map[string]map[string]struct{}{ // state -> allow next states
 	},
 	writtenHeaderState: {
 		writtenAuxState:      placeholder,
+		writtenFunctionState: placeholder,
 		writtenDBHeaderState: placeholder,
 		writtenEndState:      placeholder,
 	},
 	writtenAuxState: {
 		writtenAuxState:      placeholder,
+		writtenFunctionState: placeholder,
+		writtenDBHeaderState: placeholder,
+		writtenEndState:      placeholder,
+	},
+	writtenFunctionState: {
+		writtenFunctionState: placeholder,
 		writtenDBHeaderState: placeholder,
 		writtenEndState:      placeholder,
 	},
@@ -198,6 +206,24 @@ func (enc *Encoder) WriteAux(key, value string) error {
 		return err
 	}
 	enc.state = writtenAuxState
+	return nil
+}
+
+// WriteFunctions writes a function library (RDB_OPCODE_FUNCTION2) into rdb file.
+// Function libraries appear after aux fields and before the first SELECTDB.
+func (enc *Encoder) WriteFunctions(payload string) error {
+	if !enc.validateStateChange(writtenFunctionState) {
+		return fmt.Errorf("cannot write functions at state: %s", enc.state)
+	}
+	err := enc.write([]byte{opCodeFunction})
+	if err != nil {
+		return err
+	}
+	err = enc.writeString(payload)
+	if err != nil {
+		return err
+	}
+	enc.state = writtenFunctionState
 	return nil
 }
 

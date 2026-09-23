@@ -808,3 +808,27 @@ Tested on MacBook Air（M2，2022年）, using  a 1.3 GB RDB file encoded with 
 |AOF|25s|53.24MB/s|
 |Top10|6s|221.87MB/s|
 |Prefix|25s|53.24MB/s|
+
+# Fixture Verification
+
+`verify.sh` is the repository level gate for the RDB fixtures. It discovers
+every `.rdb` file in the repository (no hard-coded list) and runs each one
+through a Redis-free pipeline: decode, re-encode, second decode, semantic
+comparison, and an AOF conversion structure check.
+
+```bash
+./verify.sh
+```
+
+- The comparator normalizes map/set ordering but is strict about db numbers,
+  raw key bytes, expiration (millisecond precision), stream ids, consumer
+  group/PEL ownership, function libraries and encoding-version losses.
+- Losses the encoder cannot avoid (e.g. a different in-memory encoding with
+  equal payload, dropped LRU/LFU metadata) are reported as structured
+  `EXPECTED-LOSS` entries instead of being silently ignored.
+- Fixtures that are expected to fail must be listed in
+  `verify/negative_fixtures.json` with a reason and the exact pipeline stage
+  (`decode1`/`encode`/`decode2`/`compare`/`aof`) at which they fail.
+- The script runs from any working directory, keeps temporary artifacts in an
+  auto-reclaimed temp dir, and fails if the git work tree changes during the
+  run.

@@ -423,8 +423,7 @@ func (dec *Decoder) parse(cb func(object model.RedisObject) bool) error {
 			}
 			ttlCount, _, err := dec.readLength()
 			if err != nil {
-				err = errors.New("Parse Aux value failed: " + err.Error())
-				break
+				return errors.New("parse resizedb ttl count failed: " + err.Error())
 			}
 			if dec.withSpecialOpCode {
 				obj := &model.DBSizeObject{
@@ -446,8 +445,7 @@ func (dec *Decoder) parse(cb func(object model.RedisObject) bool) error {
 			}
 			value, err := dec.readString()
 			if err != nil {
-				err = errors.New("Parse Aux value failed: " + err.Error())
-				break
+				return errors.New("parse aux value failed: " + err.Error())
 			}
 			if dec.withSpecialOpCode {
 				obj := &model.AuxObject{

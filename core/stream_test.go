@@ -375,3 +375,72 @@ func decodeStreamObject(t *testing.T, buf *bytes.Buffer, stream *model.StreamObj
 		}
 	}
 }
+
+func TestWriteStreamObjectLargeIdDiff(t *testing.T) {
+	// regression test: listpack int13 holds signed 13 bit values (-4096..4095),
+	// larger ms/seq diffs must fall back to wider encodings without corruption
+	stream := &model.StreamObject{
+		BaseObject: &model.BaseObject{
+			Key: "astream",
+		},
+		Version: 1,
+		Length:  2,
+		LastId:  &model.StreamId{Ms: 1528466284783, Sequence: 3},
+		Entries: []*model.StreamEntry{
+			{
+				FirstMsgId: &model.StreamId{Ms: 1528466280444, Sequence: 0},
+				Fields:     []string{"k"},
+				Msgs: []*model.StreamMessage{
+					{
+						Id:     &model.StreamId{Ms: 1528466280444, Sequence: 0},
+						Fields: map[string]string{"k": "v"},
+					},
+					{
+						// ms diff 4339 exceeds the int13 positive range
+						Id:     &model.StreamId{Ms: 1528466284783, Sequence: 3},
+						Fields: map[string]string{"k": "v2"},
+					},
+				},
+			},
+		},
+		Groups: []*model.StreamGroup{},
+	}
+
+	var buf bytes.Buffer
+	encoder := NewEncoder(&buf)
+	if err := encoder.WriteHeader(); err != nil {
+		t.Fatalf("Failed to write header: %v", err)
+	}
+	if err := encoder.WriteDBHeader(0, 1, 0); err != nil {
+		t.Fatalf("Failed to write db header: %v", err)
+	}
+	if err := encoder.WriteStreamObject("astream", stream); err != nil {
+		t.Fatalf("Failed to write stream: %v", err)
+	}
+	if err := encoder.WriteEnd(); err != nil {
+		t.Fatalf("Failed to write end: %v", err)
+	}
+
+	decoder := NewDecoder(&buf)
+	var decoded *model.StreamObject
+	err := decoder.Parse(func(obj model.RedisObject) bool {
+		if s, ok := obj.(*model.StreamObject); ok {
+			decoded = s
+			return false
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+	if decoded == nil || len(decoded.Entries) != 1 || len(decoded.Entries[0].Msgs) != 2 {
+		t.Fatalf("decoded stream structure mismatch: %+v", decoded)
+	}
+	for i, msg := range stream.Entries[0].Msgs {
+		got := decoded.Entries[0].Msgs[i].Id
+		if got.Ms != msg.Id.Ms || got.Sequence != msg.Id.Sequence {
+			t.Errorf("msg %d id mismatch: expected %d-%d, got %d-%d",
+				i, msg.Id.Ms, msg.Id.Sequence, got.Ms, got.Sequence)
+		}
+	}
+}
